@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """
 MouseController — ultra-low-latency edition
 ============================================
@@ -191,3 +192,19 @@ class MouseController:
     def double_click(self):            _dclick_fn()
     def scroll(self, direction: str, amount: int = 3):
         _scroll_fn(amount if direction == "up" else -amount)
+=======
+import pyautogui
+
+pyautogui.FAILSAFE = False
+
+class MouseController:
+    def __init__(self):
+        self.screen_width, self.screen_height = pyautogui.size()
+
+    def move_mouse(self, x, y, cam_width, cam_height):
+
+        screen_x = int((x / cam_width) * self.screen_width)
+        screen_y = int((y / cam_height) * self.screen_height)
+
+        pyautogui.moveTo(screen_x, screen_y)
+>>>>>>> ddeb125b298a36543638c2209f87b34e9388c6bb

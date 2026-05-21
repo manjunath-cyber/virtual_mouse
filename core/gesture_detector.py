@@ -1,5 +1,6 @@
 import math
 
+<<<<<<< HEAD
 
 class GestureDetector:
     # Landmark IDs
@@ -97,3 +98,14 @@ class GestureDetector:
             "m_pinch_dist": m_pinch_dist,
             "fingers_up":   [index_up, middle_up, ring_up, pinky_up],
         }
+=======
+class GestureDetector:
+
+    @staticmethod
+    def calculate_distance(x1, y1, x2, y2):
+        return math.hypot(x2 - x1, y2 - y1)
+
+    @staticmethod
+    def is_click(distance, threshold=30):
+        return distance < threshold
+>>>>>>> ddeb125b298a36543638c2209f87b34e9388c6bb
