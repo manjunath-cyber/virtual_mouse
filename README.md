@@ -1,7 +1,6 @@
-<<<<<<< HEAD
-# 🖱️ Virtual Mouse — Enhanced Edition
+# 🖱️ Virtual Mouse — Hand Gesture Edition
 
-Control your entire computer using nothing but your webcam and hand gestures. Built with MediaPipe, OpenCV, and PyAutoGUI.
+Control your entire computer using nothing but your webcam and hand gestures. Built with MediaPipe, OpenCV, and PyAutoGUI. No mouse needed.
 
 ---
 
@@ -9,16 +8,17 @@ Control your entire computer using nothing but your webcam and hand gestures. Bu
 
 | Feature | Details |
 |---|---|
-| **Cursor Movement** | Index finger steers the cursor with smoothed tracking |
+| **Cursor Movement** | Index finger steers the cursor with adaptive smoothing |
 | **Left Click** | Pinch index + thumb together |
-| **Right Click** | Pinch middle finger + thumb |
+| **Right Click** | Fold index finger, pinch middle + thumb |
 | **Double Click** | Bring index + middle fingertips close together |
 | **Scroll** | Raise index + middle fingers, move hand up/down |
 | **Grab / Drag** | Close all fingers into a fist |
-| **Live HUD** | FPS counter, gesture badge, pinch meter, finger indicators |
-| **Real-time Tuning** | `+`/`-` keys adjust smoothing on the fly |
+| **Cursor Lock** | Cursor freezes during clicks — no drift |
+| **Live HUD** | FPS counter, gesture label, pinch meter, finger indicators |
+| **Real-time Tuning** | `+`/`-` keys adjust smoothing live without restarting |
 | **Click Cooldown** | Prevents accidental rapid-fire clicks |
-| **Margin Zone** | Edge-of-frame jitter ignored for stable tracking |
+| **Single Hand Mode** | Only tracks one hand — second hand in frame is ignored |
 
 ---
 
@@ -26,17 +26,17 @@ Control your entire computer using nothing but your webcam and hand gestures. Bu
 
 ```
 virtual-mouse/
-├── main.py                  # Entry point
+├── main.py                   # Entry point
 ├── requirements.txt
 │
 ├── core/
-│   ├── hand_tracker.py      # MediaPipe hand detection
-│   ├── mouse_controller.py  # PyAutoGUI mouse actions
-│   └── gesture_detector.py  # Gesture classification logic
+│   ├── hand_tracker.py       # MediaPipe hand detection (Tasks API + legacy)
+│   ├── mouse_controller.py   # Low-latency OS mouse control
+│   └── gesture_detector.py   # Gesture classification via landmark geometry
 │
 └── utils/
-    ├── smoothing.py         # EMA smoother + click cooldown
-    └── hud.py               # OpenCV HUD overlay renderer
+    ├── smoothing.py          # Adaptive velocity-aware smoother + click cooldown
+    └── hud.py                # OpenCV HUD overlay renderer
 ```
 
 ---
@@ -62,27 +62,6 @@ pip install -r requirements.txt
 ```
 
 ### 3. Run
-=======
-# Virtual Mouse using Hand Gestures
-
-Control your computer mouse using only your webcam and hand gestures.
-
-## Features
-
-- Cursor movement
-- Click gesture
-- Smooth tracking
-- FPS counter
-
-## Technologies
-
-- Python
-- OpenCV
-- MediaPipe
-- PyAutoGUI
-
-## Run
->>>>>>> ddeb125b298a36543638c2209f87b34e9388c6bb
 
 ```bash
 python main.py
@@ -90,29 +69,31 @@ python main.py
 
 ---
 
-<<<<<<< HEAD
 ## 🎮 Gesture Reference
 
 | Gesture | Action |
 |---|---|
 | ☝️ Index finger up | Move cursor |
-| 👆 Index + Thumb pinch | Left click |
-| ✌️ Middle + Thumb pinch | Right click |
-| ⚡ Index + Middle close together | Double click |
-| ↕️ Index + Middle spread (move up/down) | Scroll |
+| 🤌 Index + Thumb pinch | Left click |
+| ✌️ Middle + Thumb pinch (index folded) | Right click |
+| ⚡ Index + Middle fingertips close | Double click |
+| ↕️ Index + Middle spread, move up/down | Scroll |
 | ✊ All fingers closed | Grab / drag |
-| ✋ No fingers up | Idle (pause tracking) |
+| ✋ No fingers up | Idle — pauses tracking |
 
 ---
 
-## ⌨️ Keyboard Shortcuts (while running)
+## ⌨️ Keyboard Shortcuts
 
 | Key | Action |
 |---|---|
 | `q` | Quit |
-| `r` | Reset smoother (fix stuck cursor) |
-| `+` / `=` | Increase responsiveness (less smoothing) |
-| `-` | Increase smoothness (more smoothing) |
+| `r` | Reset smoother (re-enables adaptive mode) |
+| `+` / `=` | More responsive (less smoothing) |
+| `-` | Smoother (more smoothing) |
+| `d` | Toggle deadzone on/off |
+| `m` | Toggle margin zone visualisation |
+| `h` | Toggle HUD |
 
 ---
 
@@ -121,12 +102,19 @@ python main.py
 Edit the config block at the top of `main.py`:
 
 ```python
-CAMERA_INDEX    = 0      # 0 = default webcam, 1 = external
-FRAME_WIDTH     = 1280   # Camera resolution
-FRAME_HEIGHT    = 720
-SMOOTHING_ALPHA = 0.18   # 0.05 (smooth) → 0.5 (responsive)
-CLICK_COOLDOWN  = 0.45   # Seconds between allowed clicks
-SCROLL_SPEED    = 4      # Scroll lines per event
+CAMERA_INDEX   = 0      # 0 = default webcam, 1 = external
+
+FRAME_WIDTH    = 424    # Lower = faster inference, less lag
+FRAME_HEIGHT   = 240
+
+ALPHA_MIN      = 0.30   # Smoothness when hand is still (lower = more stable)
+ALPHA_MAX      = 0.85   # Responsiveness when hand moves fast
+DEADZONE       = 8      # Pixels of movement ignored (kills tremor)
+VEL_SCALE      = 40     # Distance where alpha reaches maximum
+
+MARGIN         = 60     # Dead border around frame edges
+CLICK_COOLDOWN = 0.5    # Seconds between allowed clicks
+SCROLL_SPEED   = 3      # Scroll lines per gesture event
 ```
 
 ---
@@ -134,40 +122,43 @@ SCROLL_SPEED    = 4      # Scroll lines per event
 ## 🔧 Troubleshooting
 
 **Webcam not opening**
-```python
-cap = cv2.VideoCapture(1)  # Try index 1 or 2
-```
+- Change `CAMERA_INDEX = 1` or `2` in config
 
 **Cursor too jittery**
-- Press `-` to increase smoothing
-- Or lower `SMOOTHING_ALPHA` in config
+- Press `-` while running to increase smoothing
+- Or raise `DEADZONE` in config (e.g. `12`)
 
 **Too many accidental clicks**
-- Increase `CLICK_COOLDOWN` (e.g., `0.7`)
+- Increase `CLICK_COOLDOWN` (e.g. `0.7`)
+
+**Right click not working**
+- Make sure index finger is fully folded down before pinching middle + thumb
 
 **Low FPS**
-- Lower resolution: set `FRAME_WIDTH = 640`, `FRAME_HEIGHT = 480`
+- Resolution is already optimised at 424×240
+- Lower `min_detection_confidence` to `0.35` in `main.py`
 
 ---
 
-## 🧠 Concepts You'll Learn
+## 🧠 Concepts Used
 
 - **Computer Vision** with OpenCV
-- **Hand Tracking** with MediaPipe
-- **Gesture Classification** with landmark geometry
+- **Hand Tracking** with MediaPipe Hands (Tasks API)
+- **Gesture Classification** via landmark geometry
+- **Adaptive Signal Smoothing** — velocity-aware EMA
+- **Low-latency OS mouse control** — ctypes on Windows, Quartz on macOS, Xlib on Linux
 - **Human-Computer Interaction (HCI)**
-- **Signal Smoothing** with Exponential Moving Average
-- **Real-time AI pipelines**
 
 ---
 
 ## 🚀 Ideas to Extend
 
-- **AI Gesture Commands** — ✌️ = Open Chrome, 👍 = Volume Up
-- **Virtual Keyboard** — Gesture-based typing
-- **Multi-Hand Mode** — One hand moves, one hand shortcuts
-- **Presentation Mode** — Left/right swipe for slides
-- **AR Annotations** — Draw on screen with your finger
+- **Per-app profiles** — different gestures for Chrome, Photoshop, etc.
+- **Custom gesture classifier** — train your own TFLite model
+- **Dwell click** — hover in place to auto-click
+- **Macro gestures** — gesture triggers a keyboard shortcut
+- **AR drawing** — draw on screen with your index finger
+- **Two-hand mode** — left hand = modifier keys, right hand = cursor
 
 ---
 
@@ -178,52 +169,3 @@ cap = cv2.VideoCapture(1)  # Try index 1 or 2
 - [MediaPipe](https://mediapipe.dev)
 - [PyAutoGUI](https://pyautogui.readthedocs.io)
 - [NumPy](https://numpy.org)
-=======
-# Common Errors
-
-## Webcam not opening
-
-Try:
-
-```python
-cap = cv2.VideoCapture(1)
-```
-
-## Cursor too fast
-
-Reduce scaling or smoothing alpha.
-
-## Too many clicks
-
-Add click cooldown:
-
-```python
-import time
-
-last_click = time.time()
-
-if time.time() - last_click > 1:
-    pyautogui.click()
-    last_click = time.time()
-```
-
-## Learning Concepts You’ll Gain
-- Computer Vision
-- Hand Tracking
-- Human Computer Interaction (HCI)
-- Gesture Recognition
-- Real-time AI systems
-- OpenCV pipelines
-
-## Next Level Upgrade Ideas
-
-You can turn this into:
-
-- AI Virtual Keyboard
-- Gesture Gaming Controller
-- Touchless Presentation System
-- Smart Home Controller
-- AR/VR interaction system
-
-This is actually a strong cybersecurity + AI portfolio project for a student working in practical offensive/security tooling and human-computer interaction.
->>>>>>> ddeb125b298a36543638c2209f87b34e9388c6bb
