@@ -1,11 +1,10 @@
-<<<<<<< HEAD
 """
 Virtual Mouse — Enhanced Edition  (low-latency build)
 ======================================================
 Gesture controls:
   ☝  Index up alone          → Move cursor
   🤌  Index + Thumb pinch    → Left click
-  ✌  Middle + Thumb pinch   → Right click
+  ✌  Middle + Thumb pinch   → Right click (index folded down)
   ⚡  Index + Middle close   → Double click
   🤞  Index + Middle spread  → Scroll (move hand up / down)
   ✊  All fingers closed      → Grab / drag
@@ -18,11 +17,13 @@ Keyboard:
   d        Toggle deadzone  (on/off)
   m        Toggle margin zone visualisation
   h        Toggle HUD
+  Space    Pause / Resume tracking
 """
 
 import cv2
 import sys
 import time
+import threading
 
 from core.hand_tracker     import HandTracker
 from core.mouse_controller import MouseController
@@ -30,38 +31,44 @@ from core.gesture_detector import GestureDetector
 from utils.smoothing       import Smoothener, ClickCooldown
 from utils.hud             import HUDRenderer
 
+# Tray icon (optional — gracefully skipped if pystray/pillow not installed)
+try:
+    from utils.tray import TrayIcon
+    TRAY_AVAILABLE = True
+except ImportError:
+    TRAY_AVAILABLE = False
+    print("[INFO] pystray/pillow not installed — tray icon disabled.")
+    print("[INFO] Install with: pip install pystray pillow")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  CONFIG  — tune these without touching the rest of the code
+#  CONFIG
 # ═══════════════════════════════════════════════════════════════════════════
 CAMERA_INDEX   = 0
 
 FRAME_WIDTH    = 424
 FRAME_HEIGHT   = 240
 
-# Smoother — lower alpha = smoother but slower, higher = responsive but shaky
-# DEADZONE is the most important anti-shake setting: raise it if still shaky
-ALPHA_MIN      = 0.30   # was 0.75 — lower = much less jitter at rest
-ALPHA_MAX      = 0.85   # was 1.0  — cap responsiveness so it never goes raw
-DEADZONE       = 8      # was 1    — freeze cursor if finger moves < 8px (kills tremor)
-VEL_SCALE      = 40     # was 15   — smoother ramp-up over more distance
+ALPHA_MIN      = 0.30
+ALPHA_MAX      = 0.85
+DEADZONE       = 8
+VEL_SCALE      = 40
 
-MARGIN         = 60     # was 30   — larger dead border = calmer edge tracking
+MARGIN         = 60
 
-CLICK_COOLDOWN = 0.5    # was 0.45 — slightly longer to avoid accidental clicks
+CLICK_COOLDOWN = 0.5
 SCROLL_SPEED   = 3
 SCROLL_DT      = 0.10
 SCROLL_THRESH  = 12
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Landmark connections for drawing the hand skeleton manually
 HAND_CONNECTIONS = [
-    (0,1),(1,2),(2,3),(3,4),       # thumb
-    (0,5),(5,6),(6,7),(7,8),       # index
-    (5,9),(9,10),(10,11),(11,12),  # middle
-    (9,13),(13,14),(14,15),(15,16),# ring
-    (13,17),(17,18),(18,19),(19,20),# pinky
-    (0,17),                         # palm base
+    (0,1),(1,2),(2,3),(3,4),
+    (0,5),(5,6),(6,7),(7,8),
+    (5,9),(9,10),(10,11),(11,12),
+    (9,13),(13,14),(14,15),(15,16),
+    (13,17),(17,18),(18,19),(19,20),
+    (0,17),
 ]
 
 GESTURE_COLORS = {
@@ -88,32 +95,23 @@ GESTURE_LABELS = {
 
 
 def draw_hand(frame, landmarks, gesture, gesture_info):
-    """Draw full hand skeleton + highlighted fingertips. Clear and readable."""
     if not landmarks:
         return
-
-    lm = {l[0]: l for l in landmarks}
     pts = {idx: (x, y) for idx, x, y in landmarks}
-
     gesture_color = GESTURE_COLORS.get(gesture, (180, 180, 180))
 
-    # ── Skeleton lines ────────────────────────────────────────────────────
     for a, b in HAND_CONNECTIONS:
         if a in pts and b in pts:
             cv2.line(frame, pts[a], pts[b], (60, 180, 60), 2, cv2.LINE_AA)
 
-    # ── All landmark dots ─────────────────────────────────────────────────
     for idx, (x, y) in pts.items():
         cv2.circle(frame, (x, y), 4, (200, 200, 200), -1, cv2.LINE_AA)
 
-    # ── Fingertip highlights (bigger, colored) ────────────────────────────
-    TIPS = [4, 8, 12, 16, 20]
-    for tip_id in TIPS:
+    for tip_id in [4, 8, 12, 16, 20]:
         if tip_id in pts:
             cv2.circle(frame, pts[tip_id], 10, gesture_color, 2, cv2.LINE_AA)
             cv2.circle(frame, pts[tip_id], 4,  gesture_color, -1, cv2.LINE_AA)
 
-    # ── Index fingertip crosshair (cursor anchor point) ───────────────────
     if 8 in pts:
         ix, iy = pts[8]
         length = 18
@@ -122,61 +120,74 @@ def draw_hand(frame, landmarks, gesture, gesture_info):
         cv2.line(frame, (ix, iy - length), (ix, iy - 6), gesture_color, 2, cv2.LINE_AA)
         cv2.line(frame, (ix, iy + 6),  (ix, iy + length), gesture_color, 2, cv2.LINE_AA)
 
-    # ── Pinch line between index and thumb ────────────────────────────────
     if 4 in pts and 8 in pts:
         line_col = (0, 80, 255) if gesture == "left_click" else (60, 60, 60)
         cv2.line(frame, pts[4], pts[8], line_col, 2, cv2.LINE_AA)
 
-    # ── Gesture label near wrist ──────────────────────────────────────────
     if 0 in pts:
         wx, wy = pts[0]
         label = GESTURE_LABELS.get(gesture, gesture.upper())
-        # Dark background for readability
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(frame, (wx - 4, wy + 10), (wx + tw + 6, wy + th + 18),
-                      (0, 0, 0), -1)
+        cv2.rectangle(frame, (wx - 4, wy + 10), (wx + tw + 6, wy + th + 18), (0, 0, 0), -1)
         cv2.putText(frame, label, (wx, wy + th + 14),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, gesture_color, 2, cv2.LINE_AA)
 
 
-def draw_mini_hud(frame, gesture, fps, pinch_dist, fingers_up):
-    """Compact always-visible HUD in top-left corner."""
-    h, w = frame.shape[:2]
+def draw_mini_hud(frame, gesture, fps, pinch_dist, fingers_up, paused=False):
     gesture_color = GESTURE_COLORS.get(gesture, (180, 180, 180))
+    if paused:
+        gesture_color = (80, 80, 80)
 
-    # Semi-transparent background panel
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (200, 110), (10, 10, 20), -1)
     cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
     cv2.rectangle(frame, (0, 0), (200, 110), gesture_color, 1)
 
-    # FPS
     fps_color = (0, 220, 80) if fps >= 24 else (0, 180, 255) if fps >= 15 else (0, 60, 255)
     cv2.putText(frame, f"FPS: {fps}", (8, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, fps_color, 1, cv2.LINE_AA)
 
-    # Gesture
-    label = GESTURE_LABELS.get(gesture, gesture.upper())
+    label = "PAUSED" if paused else GESTURE_LABELS.get(gesture, gesture.upper())
     cv2.putText(frame, label, (8, 48),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, gesture_color, 2, cv2.LINE_AA)
 
-    # Pinch bar
     bar_fill = int(min(pinch_dist / 120.0, 1.0) * 182)
     cv2.rectangle(frame, (8, 58), (190, 70), (40, 40, 40), -1)
     cv2.rectangle(frame, (8, 58), (8 + bar_fill, 70), gesture_color, -1)
     cv2.putText(frame, "PINCH", (8, 84),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.38, (100, 100, 100), 1, cv2.LINE_AA)
 
-    # Finger indicators
     names = ["I", "M", "R", "P"]
     for i, (name, up) in enumerate(zip(names, fingers_up)):
-        fc = (0, 220, 110) if up else (60, 60, 60)
+        fc = (0, 220, 110) if up and not paused else (60, 60, 60)
         cv2.circle(frame, (20 + i * 42, 100), 7, fc, -1, cv2.LINE_AA)
         cv2.putText(frame, name, (14 + i * 42, 100),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1, cv2.LINE_AA)
 
 
 def main():
+    # ── Shared state for tray ──────────────────────────────────────────────
+    running = threading.Event()
+    running.set()
+    paused  = threading.Event()   # set = paused, clear = active
+
+    def on_stop():
+        running.clear()
+
+    def on_pause_toggle(active: bool):
+        if active:
+            paused.clear()
+            print("[INFO] Tracking resumed.")
+        else:
+            paused.set()
+            print("[INFO] Tracking paused.")
+
+    # ── Tray icon ──────────────────────────────────────────────────────────
+    tray = None
+    if TRAY_AVAILABLE:
+        tray = TrayIcon(stop_callback=on_stop, pause_callback=on_pause_toggle)
+        print("[INFO] System tray icon active — right-click it to pause or exit.")
+
     # ── Camera ────────────────────────────────────────────────────────────
     cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
     if not cap.isOpened():
@@ -207,25 +218,19 @@ def main():
     last_scroll_t = 0.0
     show_margin   = False
     show_hud      = True
-    locked_pos    = None   # (sx, sy) frozen during click gestures
+    locked_pos    = None
 
-    # FPS tracking
     fps_times = []
     fps_val   = 0
 
-    print("[INFO] Virtual Mouse running. Press 'q' to quit, 'h' to toggle HUD.")
-    print(f"[INFO] DEADZONE={DEADZONE}px  ALPHA={ALPHA_MIN}~{ALPHA_MAX}  "
-          f"VEL_SCALE={VEL_SCALE}")
-    print("[INFO] If still shaky: press '-' key to increase smoothing.")
+    print("[INFO] Virtual Mouse running. Press 'q' to quit, Space to pause.")
 
-    while True:
-        # ── Grab latest frame ──────────────────────────────────────────────
+    while running.is_set():
         cap.grab()
         success, frame = cap.read()
         if not success:
             continue
 
-        # FPS calc
         now = time.time()
         fps_times.append(now)
         fps_times = [t for t in fps_times if now - t < 1.0]
@@ -234,26 +239,45 @@ def main():
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
 
-        # ── Detect (draw=False — we draw manually below, much cleaner) ────
+        # ── PAUSED state ──────────────────────────────────────────────────
+        if paused.is_set():
+            if show_hud:
+                draw_mini_hud(frame, "none", fps_val, 100,
+                              [False]*4, paused=True)
+            # Big centered PAUSED label
+            cv2.putText(frame, "PAUSED — Space to resume", (w//2 - 160, h//2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 80, 80), 2, cv2.LINE_AA)
+            cv2.imshow("Virtual Mouse", frame)
+            key = cv2.waitKey(30) & 0xFF
+            if key == ord('q'):
+                running.clear()
+            elif key == ord(' '):
+                paused.clear()
+                if tray:
+                    tray.set_active(True)
+                print("[INFO] Tracking resumed.")
+            continue
+
+        # ── Detect ────────────────────────────────────────────────────────
         frame     = tracker.find_hands(frame, draw=False)
         landmarks = tracker.get_landmarks(frame)
 
         if not landmarks:
             cv2.putText(frame, "Show your hand to the camera", (10, h // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 60, 255), 2, cv2.LINE_AA)
+            if show_hud:
+                draw_mini_hud(frame, "none", fps_val, 100, [False]*4)
             cv2.imshow("Virtual Mouse", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                running.clear()
             continue
 
         n_hands      = tracker.num_hands()
         gesture_info = detector.detect(landmarks)
         gesture      = gesture_info.get("gesture", "none")
 
-        # ── Draw full hand skeleton + labels ──────────────────────────────
         draw_hand(frame, landmarks, gesture, gesture_info)
 
-        # ── Mini HUD ──────────────────────────────────────────────────────
         if show_hud:
             draw_mini_hud(
                 frame, gesture, fps_val,
@@ -271,13 +295,7 @@ def main():
             t = time.time()
 
             if gesture in CLICK_GESTURES:
-                # ── CURSOR LOCK: freeze position on click entry ────────────
-                # When a click gesture starts, snap the smoother to the
-                # last known stable position and stop updating it.
-                # This prevents the fingertip's pinch motion from dragging
-                # the cursor while the click fires.
                 if locked_pos is None:
-                    # First frame of this click — capture current position
                     locked_pos = (
                         int(smoother.prev_x) if smoother.prev_x else ix,
                         int(smoother.prev_y) if smoother.prev_y else iy,
@@ -294,9 +312,7 @@ def main():
                 elif gesture == "double_click" and cooldown.ready():
                     mouse.double_click()
                     cooldown.register()
-
             else:
-                # ── Normal movement — release lock ─────────────────────────
                 locked_pos = None
                 sx, sy = smoother.smooth(ix, iy)
                 mouse.move_mouse(sx, sy, w, h)
@@ -333,7 +349,14 @@ def main():
         # ── Keys ──────────────────────────────────────────────────────────
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
-            break
+            running.clear()
+        elif key == ord(' '):
+            paused.set()
+            smoother.reset()
+            locked_pos = None
+            if tray:
+                tray.set_active(False)
+            print("[INFO] Tracking paused.")
         elif key == ord('r'):
             smoother.reset()
             print("[INFO] Smoother reset.")
@@ -345,105 +368,19 @@ def main():
             print(f"[INFO] Alpha → {smoother.alpha:.2f}")
         elif key == ord('d'):
             smoother.deadzone = 0 if smoother.deadzone > 0 else DEADZONE
-            print(f"[INFO] Deadzone {'ON (' + str(DEADZONE) + 'px)' if smoother.deadzone else 'OFF'}")
+            print(f"[INFO] Deadzone {'ON' if smoother.deadzone else 'OFF'}")
         elif key == ord('m'):
             show_margin = not show_margin
         elif key == ord('h'):
             show_hud = not show_hud
 
+    # ── Cleanup ───────────────────────────────────────────────────────────
     cap.release()
     cv2.destroyAllWindows()
-    print("[INFO] Stopped.")
+    if tray:
+        tray.stop()
+    print("[INFO] Virtual Mouse stopped.")
 
 
 if __name__ == "__main__":
     main()
-=======
-import cv2
-import pyautogui
-import time
-
-from core.hand_tracker import HandTracker
-from core.mouse_controller import MouseController
-from core.gesture_detector import GestureDetector
-from utils.smoothing import Smoothener
-
-cap = cv2.VideoCapture(0)
-
-tracker = HandTracker()
-mouse = MouseController()
-smoothener = Smoothener()
-
-prev_time = 0
-last_click = time.time()
-
-while True:
-
-    success, frame = cap.read()
-    if not success:
-        break
-
-    frame = cv2.flip(frame, 1)
-
-    h, w, c = frame.shape
-
-    frame = tracker.find_hands(frame)
-
-    landmarks = tracker.get_landmarks(frame)
-
-    if landmarks:
-
-        # Index finger tip
-        _, ix, iy = landmarks[8]
-
-        # Thumb tip
-        _, tx, ty = landmarks[4]
-
-        # Draw circle on index finger
-        cv2.circle(frame, (ix, iy), 10, (255, 0, 255), cv2.FILLED)
-
-        # Smooth and move mouse
-        sx, sy = smoothener.smooth(ix, iy)
-        mouse.move_mouse(sx, sy, w, h)
-
-        # Check for click gesture
-        distance = GestureDetector.calculate_distance(
-            ix, iy, tx, ty
-        )
-
-        if GestureDetector.is_click(distance):
-            
-            # Click cooldown
-            if time.time() - last_click > 1:
-                pyautogui.click()
-                last_click = time.time()
-
-            cv2.putText(frame,
-                        "CLICK",
-                        (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (0, 0, 255),
-                        3)
-
-    # Calculate FPS
-    curr_time = time.time()
-    fps = 1 / (curr_time - prev_time)
-    prev_time = curr_time
-
-    cv2.putText(frame,
-                f'FPS: {int(fps)}',
-                (20, 100),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (255, 255, 0),
-                2)
-
-    cv2.imshow("Virtual Mouse", frame)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
->>>>>>> ddeb125b298a36543638c2209f87b34e9388c6bb

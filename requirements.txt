@@ -1,8 +1,6 @@
 opencv-python
 mediapipe
 pyautogui
-<<<<<<< HEAD
 numpy
-=======
-numpy
->>>>>>> ddeb125b298a36543638c2209f87b34e9388c6bb
+pystray
+pillow
